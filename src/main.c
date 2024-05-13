@@ -11,8 +11,22 @@
 #define SERVER_PORT "8080"
 #define CONNECTION_QUEUE_SIZE 10
 
+/*
+** Server waits for a new client to connect;
+** when a client connects, the server sends it a * character and enters a "WAIT_FOR_MSG".
+** In this state, the server ignores everything the client sends until it sees a ^ character that signals that a new message begins.
+** At this point it moves to the "IN_MSG" state, where it echoes back everything the client sends, incrementing each byte.
+** When the client sends a $, the server goes back to waiting for a new message.
+** The ^ and $ characters are only used to delimit messages - they are not echoed back.
+**
+** source: https://eli.thegreenplace.net/2017/concurrent-servers-part-1-introduction/
+*/
+typedef enum { WAIT_FOR_MSG, IN_MSG } ProcessingState;
+
+
 int create_listener_socket();
 void *get_in_addr(struct sockaddr *sockaddr);
+int serve_connection(int client_socket);
 
 int main() {
     char client_ip[INET6_ADDRSTRLEN];
@@ -34,10 +48,9 @@ int main() {
     while (true) {
         struct sockaddr_storage client_sockaddr_storage;
         socklen_t client_sockaddr_size = sizeof client_sockaddr_storage;
-        struct sockaddr* client_sockaddr = (struct sockaddr*)&client_sockaddr_storage;
-        
-        int client_socket = accept(listener_socket, client_sockaddr, &client_sockaddr_size);
+        struct sockaddr* client_sockaddr = (struct sockaddr*)&client_sockaddr_storage; 
 
+        int client_socket = accept(listener_socket, client_sockaddr, &client_sockaddr_size);
         if (client_socket == -1) {
             perror("Cannot accept connection");
             continue;
@@ -50,9 +63,10 @@ int main() {
 
         printf("Server info: got new connection from %s\n", client_ip);
 
-        // handle it
-
+        serve_connection(client_socket);
         close(client_socket);
+
+        printf("Server info: %s connection done %s\n", client_ip);
     }
 
     return 0;
@@ -102,7 +116,7 @@ int create_listener_socket() {
 
     freeaddrinfo(service_info);
 
-    if (addr_ptr == NULL)  {
+    if (addr_ptr == NULL) {
         fprintf(stderr, "Server error: socket could not be created. No available address was found.\n");
         return -1;
     }
@@ -119,4 +133,51 @@ void *get_in_addr(struct sockaddr *socket_addr) {
     }
 
     return &(((struct sockaddr_in6*)socket_addr)->sin6_addr);
+}
+
+/*
+** Serves one client using the protocol described in the documentation for ProcessingState enum.
+** This function does not manage the passed socket, the caller must close the socket itself.
+*/
+int serve_connection(int client_socket) {
+    if (send(client_socket, "*", 1, 0) < 1) {
+        perror("Cannot send server confirmation");
+        return -1;
+    }
+
+    ProcessingState state = WAIT_FOR_MSG;
+    while (true) {
+        uint8_t response_buffer[1024];
+        int response_len = recv(client_socket, response_buffer, sizeof response_buffer, 0);
+        if (response_len < 0) {
+            perror("Cannnot recieve a response from the client");
+            return -1;
+        } else if (response_len == 0) {
+            break; // client has completed the connection
+        }
+        
+        for (int i = 0; i < response_len; i++) {
+            switch (state) {
+                case WAIT_FOR_MSG:
+                    if (response_buffer[i] == '^') {
+                        state = IN_MSG;
+                    }
+                    break;
+
+                case IN_MSG:
+                    if (response_buffer[i] == '$') {
+                        state = WAIT_FOR_MSG;
+                    } else {
+                        response_buffer[i] += 1;
+                        if (send(client_socket, &response_buffer[i], 1, 0) < 1) {
+                            perror("Cannnot send response to the client");
+                            return -1; 
+                        }
+                    }
+                    break;
+            }
+        }
+    }
+
+    return client_socket;
 }
